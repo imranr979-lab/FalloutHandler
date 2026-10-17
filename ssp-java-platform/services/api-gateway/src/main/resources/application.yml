@@ -1,0 +1,142 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ssp-api-gateway
+  cloud:
+    gateway:
+      # ── Global filters ─────────────────────────────────────────────────────
+      default-filters:
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter.replenishRate: 100
+            redis-rate-limiter.burstCapacity: 200
+            redis-rate-limiter.requestedTokens: 1
+        - name: SecureHeaders
+        - name: AddRequestHeader
+          args:
+            name: X-Gateway-Version
+            value: "1.0.0"
+
+      # ── Routes ─────────────────────────────────────────────────────────────
+      routes:
+
+        # Porting Service
+        - id: porting-service
+          uri: http://porting-service.ssp.svc.cluster.local:8081
+          predicates:
+            - Path=/api/v1/port/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: portingCB
+                fallbackUri: forward:/fallback/porting
+            - name: Retry
+              args:
+                retries: 3
+                statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE
+                backoff.firstBackoff: 50ms
+                backoff.maxBackoff: 500ms
+            - RewritePath=/api/v1/port/(?<segment>.*), /api/v1/port/$\{segment}
+            - name: AuthFilter  # Custom JWT validation filter
+            - name: RequestLogger
+
+        # Notification Service
+        - id: notification-service
+          uri: http://notification-service.ssp.svc.cluster.local:8082
+          predicates:
+            - Path=/api/v1/notifications/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: notificationCB
+                fallbackUri: forward:/fallback/notification
+            - name: AuthFilter
+
+        # Fallout Service
+        - id: fallout-service
+          uri: http://fallout-service.ssp.svc.cluster.local:8083
+          predicates:
+            - Path=/api/v1/fallout/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: falloutCB
+                fallbackUri: forward:/fallback/fallout
+            - name: AuthFilter
+
+        # Market Validation Service
+        - id: market-validation-service
+          uri: http://market-validation-service.ssp.svc.cluster.local:8084
+          predicates:
+            - Path=/api/v1/market/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: marketCB
+                fallbackUri: forward:/fallback/market
+            - name: AuthFilter
+
+        # Auth Service — public endpoint, no auth filter
+        - id: auth-service
+          uri: http://auth-service.ssp.svc.cluster.local:8085
+          predicates:
+            - Path=/api/v1/auth/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: authCB
+                fallbackUri: forward:/fallback/auth
+
+  # Redis for rate limiting
+  data:
+    redis:
+      host: ${REDIS_HOST:redis-service.ssp.svc.cluster.local}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      ssl:
+        enabled: ${REDIS_SSL:true}
+
+# Resilience4j circuit breakers
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        permittedNumberOfCallsInHalfOpenState: 3
+        slidingWindowType: COUNT_BASED
+        minimumNumberOfCalls: 5
+        waitDurationInOpenState: 5s
+        failureRateThreshold: 50
+        eventConsumerBufferSize: 10
+
+# Actuator / health
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# JWT config (public key for verification only — private key in auth-service)
+app:
+  jwt:
+    public-key: ${JWT_PUBLIC_KEY}
+
+# Logging
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    com.nexatel.ssp: DEBUG
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%level","service":"api-gateway","trace":"%X{traceId}","span":"%X{spanId}","message":"%message"}%n'

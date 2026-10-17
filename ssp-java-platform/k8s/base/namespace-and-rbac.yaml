@@ -1,0 +1,159 @@
+##############################################################################
+# SSP Platform — Kubernetes Namespace, RBAC, Network Policies
+##############################################################################
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ssp
+  labels:
+    name: ssp
+    environment: base
+    app.kubernetes.io/managed-by: kustomize
+
+---
+# ── Network Policy — deny all ingress by default ─────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: ssp
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# ── Network Policy — allow API gateway to all services ────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-services
+  namespace: ssp
+spec:
+  podSelector:
+    matchLabels:
+      tier: service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+        - protocol: TCP
+          port: 8084
+        - protocol: TCP
+          port: 8085
+
+---
+# ── Network Policy — allow Prometheus scraping ────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: ssp
+spec:
+  podSelector:
+    matchLabels:
+      tier: service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+        - protocol: TCP
+          port: 8084
+        - protocol: TCP
+          port: 8085
+
+---
+# ── ServiceAccount with IRSA annotation for porting service ──────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssp-porting-sa
+  namespace: ssp
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/ssp-porting-role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssp-notification-sa
+  namespace: ssp
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/ssp-notification-role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssp-fallout-sa
+  namespace: ssp
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/ssp-fallout-role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssp-market-sa
+  namespace: ssp
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/ssp-market-role
+
+---
+# ── PodDisruptionBudget — ensure HA during node maintenance ──────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: porting-service-pdb
+  namespace: ssp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: porting-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: notification-service-pdb
+  namespace: ssp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: notification-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: ssp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway

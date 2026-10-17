@@ -1,0 +1,219 @@
+##############################################################################
+# Porting Service — Kubernetes Deployment
+# Namespace: ssp
+# Uses AWS EKS with IRSA (IAM Roles for Service Accounts) for DynamoDB/SQS
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: porting-service
+  namespace: ssp
+  labels:
+    app: porting-service
+    version: "1.0.0"
+    component: backend
+    tier: service
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: porting-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # Zero-downtime rolling update
+  template:
+    metadata:
+      labels:
+        app: porting-service
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8081"
+    spec:
+      serviceAccountName: ssp-porting-sa  # IRSA service account
+
+      # Security context — non-root container
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+
+      # Topology spread for high availability across AZs
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: porting-service
+
+      containers:
+        - name: porting-service
+          image: ECR_REGISTRY/ssp-porting-service:IMAGE_TAG
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+              name: http
+              protocol: TCP
+
+          # Security — read-only filesystem, drop all capabilities
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              valueFrom:
+                configMapKeyRef:
+                  name: ssp-config
+                  key: SPRING_PROFILES_ACTIVE
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: ssp-config
+                  key: AWS_REGION
+            - name: AWS_DYNAMODB_PORTING_TABLE
+              valueFrom:
+                configMapKeyRef:
+                  name: ssp-config
+                  key: PORTING_TABLE
+            - name: AWS_SQS_EVENTS_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: ssp-config
+                  key: EVENTS_QUEUE_URL
+            - name: SPRING_CACHE_TYPE
+              value: "redis"
+            - name: SPRING_DATA_REDIS_HOST
+              value: "redis-service.ssp.svc.cluster.local"
+            - name: JAVA_OPTS
+              value: >-
+                -Xms256m -Xmx512m
+                -XX:+UseContainerSupport
+                -XX:MaxRAMPercentage=75.0
+                -Djava.security.egd=file:/dev/urandom
+                -XX:+ExitOnOutOfMemoryError
+
+          # Liveness — restart if Spring context is dead
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 10
+
+          # Readiness — remove from load balancer if not ready
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Startup — give JVM time to warm up
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            failureThreshold: 30
+            periodSeconds: 10
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1024Mi"
+
+          # Writable temp dir for JVM (read-only filesystem)
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+            - name: logs-dir
+              mountPath: /app/logs
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+        - name: logs-dir
+          emptyDir: {}
+
+      # Graceful shutdown
+      terminationGracePeriodSeconds: 60
+
+---
+##############################################################################
+# Porting Service — Kubernetes Service
+##############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: porting-service
+  namespace: ssp
+  labels:
+    app: porting-service
+spec:
+  type: ClusterIP
+  selector:
+    app: porting-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+
+---
+##############################################################################
+# Porting Service — Horizontal Pod Autoscaler
+##############################################################################
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: porting-service-hpa
+  namespace: ssp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: porting-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60

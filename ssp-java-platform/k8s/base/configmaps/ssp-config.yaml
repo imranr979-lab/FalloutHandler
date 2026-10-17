@@ -1,0 +1,121 @@
+##############################################################################
+# SSP Platform — ConfigMaps (non-secret configuration)
+# Secrets are in AWS Secrets Manager, injected via External Secrets Operator
+##############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssp-config
+  namespace: ssp
+data:
+  AWS_REGION:             "us-east-1"
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  LOG_LEVEL:              "INFO"
+
+  # DynamoDB table names
+  PORTING_TABLE:          "ssp-porting-requests"
+  FALLOUT_TABLE:          "ssp-fallout-records"
+  NOTIFICATIONS_TABLE:    "ssp-notifications"
+  NPA_TABLE:              "ssp-npa-market-coverage"
+
+  # Internal Kubernetes DNS endpoints
+  PORTING_SERVICE_URL:    "http://porting-service.ssp.svc.cluster.local:8081"
+  FALLOUT_SERVICE_URL:    "http://fallout-service.ssp.svc.cluster.local:8083"
+  MARKET_SERVICE_URL:     "http://market-validation-service.ssp.svc.cluster.local:8084"
+  AUTH_SERVICE_URL:       "http://auth-service.ssp.svc.cluster.local:8085"
+
+  # Portal URL for SMS deep links
+  PORTAL_BASE_URL:        "https://ssp.nexatel-internal.example.com"
+
+---
+##############################################################################
+# ExternalSecret — pulls Twilio credentials from AWS Secrets Manager
+# Requires External Secrets Operator (ESO) installed in the cluster
+##############################################################################
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: twilio-secret
+  namespace: ssp
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: twilio-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: TWILIO_ACCOUNT_SID
+      remoteRef:
+        key: "ssp/twilio"
+        property: accountSid
+    - secretKey: TWILIO_AUTH_TOKEN
+      remoteRef:
+        key: "ssp/twilio"
+        property: authToken
+    - secretKey: TWILIO_FROM_NUMBER
+      remoteRef:
+        key: "ssp/twilio"
+        property: fromNumber
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: jwt-secret
+  namespace: ssp
+spec:
+  refreshInterval: 24h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: jwt-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: JWT_SECRET
+      remoteRef:
+        key: "ssp/jwt"
+        property: secret
+    - secretKey: JWT_PUBLIC_KEY
+      remoteRef:
+        key: "ssp/jwt"
+        property: publicKey
+
+---
+##############################################################################
+# Ingress — AWS ALB Ingress Controller
+##############################################################################
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ssp-ingress
+  namespace: ssp
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: "CERT_ARN"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/wafv2-acl-arn: "WAF_ACL_ARN"
+    alb.ingress.kubernetes.io/load-balancer-attributes: >
+      routing.http2.enabled=true,
+      idle_timeout.timeout_seconds=60,
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=ssp-alb-logs
+spec:
+  rules:
+    - host: ssp.nexatel-internal.example.com
+      http:
+        paths:
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
