@@ -3,7 +3,7 @@
 Cloud-native Java 21 + Spring Boot 3 microservices for number porting management,
 deployed on AWS EKS with Kubernetes, Twilio SMS notifications.
 
-> **All company names are fictitious.** NexaTel = wireless carrier, ClearPort = OMS clearinghouse, OrderFlow = BSS/OSS system.
+> **All company names are fictitious.** NexaTel = wireless carrier, ClearPort = OrderFlow = BSS/OSS system.
 
 ---
 
